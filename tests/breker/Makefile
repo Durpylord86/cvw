@@ -1,3 +1,6 @@
+NUM_TESTS ?= 1 # Number of tests to generate for each constraint file
+
+# General Makefile settings
 SHELL := /bin/bash
 
 # Breker/Trek paths and variables
@@ -7,7 +10,7 @@ CONSTRAINTS_DIR  := $(WALLY)/tests/breker/constraints
 PLATFORM_YAML    := $(TREKFILES)/platform.yaml
 CUSTOMER_YAML    := $(TREKFILES)/customer.yaml
 TREKSVIP_YAML    := $(BREKER_HOME)/examples/tutorials/svip/treksvip/yaml/treksvip.yaml
-CONSTRAINT_FILES := $(shell find $(CONSTRAINTS_DIR) -type f)
+CONSTRAINT_FILES := $(wildcard $(CONSTRAINTS_DIR)/*.yaml)
 TREKEXE_FLAGS    += --seed 0x # free (0x) or lock (0x1) the seed used for test generation
 TREKSVIP         := source $(TREKFILES)/breker-setup.sh && treksvip -p $(PLATFORM_YAML) -p $(TREKSVIP_YAML) $(TREKEXE_FLAGS)
 
@@ -21,26 +24,29 @@ LINK_FLAGS    := -nostartfiles
 CFLAGS        := -Wa,-alhs -Wa,-L -mcmodel=medany -Og -DSINGLE_CPU
 WIDTH         := 64
 
-# Find all constraint files and generate tests for each one
-TESTS = $(patsubst $(CONSTRAINTS_DIR)/%.yaml,$(TESTDIR)/%,$(CONSTRAINT_FILES))
+# Find all constraint files and generate NUM_TESTS tests for each one
+TESTS = $(foreach yaml,$(CONSTRAINT_FILES),$(foreach n,$(shell seq 1 $(NUM_TESTS)),$(patsubst $(CONSTRAINTS_DIR)/%.yaml,$(TESTDIR)/%_$(n),$(yaml))))
+
 .PHONY: all clean
 all: $(TESTS)
 
 # Generate c tests
-$(TESTDIR)/%: $(CONSTRAINTS_DIR)/%.yaml | $(TESTDIR)
-	$(TREKSVIP) -p $< -p $(CUSTOMER_YAML) -o $@/$* -e pss_top.entry
-	$(MAKE) $@/$*.elf.memfile
+$(TESTDIR)/%: | $(TESTDIR)
+	$(eval CONSTRAINT_FILE := $(shell echo $* | sed 's/_[0-9]*$$//'))
+	$(TREKSVIP) -p $(CONSTRAINTS_DIR)/$(CONSTRAINT_FILE).yaml -p $(CUSTOMER_YAML) -o $@/$* -e pss_top.entry
+	$(MAKE) $@/$*.elf
 
 # Compile c code
-.PRECIOUS: %.elf
-%.elf: %.c 
+.PRECIOUS: $(TESTDIR)/%.elf
+$(TESTDIR)/%.elf: $(TESTDIR)/%.c 
 	riscv64-unknown-elf-gcc $(MARCH) $(MABI) $(CFLAGS) $(LINK_FLAGS) -T$(LINKER) -I$(START_LIB_DIR) $(START_LIB) -g -o $@ $< > /dev/null
+	$(MAKE) $@.objdump
 
 # Convert elf to hex
-%.elf.memfile: %.elf
-	riscv64-unknown-elf-objdump -D $< > $<.objdump
-	riscv64-unknown-elf-elf2hex --bit-width $(WIDTH) --input $< --output $@
-	extractFunctionRadix.sh $<.objdump
+$(TESTDIR)/%.elf.objdump: $(TESTDIR)/%.elf
+	riscv64-unknown-elf-objdump -D $< > $@
+# riscv64-unknown-elf-elf2hex --bit-width $(WIDTH) --input $< --output $@
+# extractFunctionRadix.sh $<.objdump
 
 # View the model graph TODO: What does this do? Move to another makefile?
 %.view_graph: $(CONSTRAINTS_DIR)/%.yaml
@@ -50,4 +56,4 @@ $(TESTDIR):
 	mkdir -p $(TESTDIR)
 
 clean:
-	rm -rf $(TESTS)
+	rm -rf $(TESTDIR)/*

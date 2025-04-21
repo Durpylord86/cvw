@@ -86,7 +86,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   logic [1:0]               NextPageType;
   logic [P.SVMODE_BITS-1:0] SvMode;
   logic [P.XLEN-1:0]        TranslationVAdr;
-  logic [P.XLEN-1:0]        NextPTE;
+  logic [P.XLEN-1:0]        NextPTE, NextPTE2;
   logic                     UpdatePTE;
   logic                     HPTWUpdateDA;
   logic [P.PA_BITS-1:0]     HPTWReadAdr;
@@ -104,18 +104,20 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   logic                     HPTWAccessFaultDelay;
   logic                     TakeHPTWFault;
   logic                     PBMTFaultM;
+  logic                     DAUFaultM;
+  logic                     PBMTOrDAUFaultM;
   logic                     HPTWFaultM;
-  logic                     ResetPTE;
-  
+ 
   // map hptw access faults onto either the original LSU load/store fault or instruction access fault
   assign LSUAccessFaultM         = LSULoadAccessFaultM | LSUStoreAmoAccessFaultM;
-  assign HPTWFaultM              = LSUAccessFaultM | PBMTFaultM;
+  assign PBMTOrDAUFaultM         = PBMTFaultM | DAUFaultM;
+  assign HPTWFaultM              = LSUAccessFaultM | PBMTOrDAUFaultM;
   assign HPTWLoadAccessFault     = LSUAccessFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];  
   assign HPTWStoreAmoAccessFault = LSUAccessFaultM & DTLBWalk & MemRWM[0];
   assign HPTWInstrAccessFault    = LSUAccessFaultM & ~DTLBWalk;
-  assign HPTWLoadPageFault       = PBMTFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
-  assign HPTWStoreAmoPageFault   = PBMTFaultM & DTLBWalk & MemRWM[0];   
-  assign HPTWInstrPageFault      = PBMTFaultM & ~DTLBWalk;
+  assign HPTWLoadPageFault       = PBMTOrDAUFaultM & DTLBWalk & MemRWM[1] & ~MemRWM[0];
+  assign HPTWStoreAmoPageFault   = PBMTOrDAUFaultM & DTLBWalk & MemRWM[0];
+  assign HPTWInstrPageFault      = PBMTOrDAUFaultM & ~DTLBWalk;
 
   flopr #(6) HPTWAccesFaultReg(clk, reset, {HPTWLoadAccessFault, HPTWStoreAmoAccessFault, HPTWInstrAccessFault, 
                                             HPTWLoadPageFault, HPTWStoreAmoPageFault, HPTWInstrPageFault},
@@ -143,8 +145,9 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
 
   // State flops
   flopenr #(1) TLBMissMReg(clk, reset, StartWalk, DTLBMissOrUpdateDAM, DTLBWalk); // when walk begins, record whether it was for DTLB (or record 0 for ITLB)
-  assign PRegEn = HPTWRW[1] & ~DCacheBusStallM | UpdatePTE;
-  flopenr #(P.XLEN) PTEReg(clk, ResetPTE, PRegEn, NextPTE, PTE); // Capture page table entry from data cache
+  assign PRegEn = HPTWRW[1] & ~DCacheBusStallM | UpdatePTE | (NextWalkerState == IDLE);
+  assign NextPTE2 = (NextWalkerState == IDLE) ? '0 : NextPTE;
+  flopenr #(P.XLEN) PTEReg(clk, reset, PRegEn, NextPTE2, PTE); // Capture page table entry from data cache
 
   // Assign PTE descriptors common across all XLEN values
   // For non-leaf PTEs, D, A, U bits are reserved and ignored.  They do not cause faults while walking the page table
@@ -155,6 +158,7 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
   assign ValidNonLeafPTE = Valid & ~LeafPTE;
   if(P.XLEN == 64) assign PBMTFaultM = ValidNonLeafPTE & (|PTE[62:61]);
   else assign PBMTFaultM = 1'b0;
+  assign DAUFaultM = ValidNonLeafPTE & (|PTE[7:6] | PTE[4]);
 
   if(P.SVADU_SUPPORTED) begin : hptwwrites
     logic                 ReadAccess, WriteAccess;
@@ -306,7 +310,6 @@ module hptw import cvw::*;  #(parameter cvw_t P) (
 
   assign HPTWFlushW = (WalkerState == IDLE & TLBMissOrUpdateDA) | (WalkerState != IDLE & HPTWFaultM);
   
-  assign ResetPTE = reset | (NextWalkerState == IDLE);
   assign SelHPTW = WalkerState != IDLE;
   assign HPTWStall = (WalkerState != IDLE & WalkerState != FAULT) | (WalkerState == IDLE & TLBMissOrUpdateDA); 
 
